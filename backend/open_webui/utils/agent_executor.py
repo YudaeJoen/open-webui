@@ -10,6 +10,7 @@
 
 import logging
 import json
+import re
 import time
 import asyncio
 from typing import Optional, Dict, List, Any
@@ -70,7 +71,7 @@ class AgentExecutor:
             plan_response = await self._call_llm(plan_prompt, format="json")
 
             # 플랜 파싱
-            plan_data = json.loads(plan_response)
+            plan_data = self._parse_json(plan_response)
             plan = AgentPlan(
                 goal=plan_data.get("goal", self.agent.user_request),
                 steps=[
@@ -316,7 +317,7 @@ JSON 형식으로 응답:
 """
 
         response = await self._call_llm(prompt, format="json")
-        return json.loads(response)
+        return self._parse_json(response)
 
     async def _execute_image_step(self, step: AgentPlanStep) -> Dict[str, Any]:
         """이미지 생성 단계 실행 - 지능형 이미지 요구사항 분석 및 개별 최적화"""
@@ -371,7 +372,7 @@ JSON 형식으로 응답:
 """
 
         analysis_response = await self._call_llm(analysis_prompt, format="json")
-        image_requirements = json.loads(analysis_response)
+        image_requirements = self._parse_json(analysis_response)
 
         # 이미지 개수를 10개로 제한
         images_list = image_requirements.get("images", [])[:10]
@@ -424,7 +425,7 @@ JSON 형식으로 응답:
 """
 
             sd_settings_response = await self._call_llm(sd_settings_prompt, format="json")
-            sd_settings = json.loads(sd_settings_response)
+            sd_settings = self._parse_json(sd_settings_response)
 
             log.info(f"SD settings generated for {img_spec['name']}: {sd_settings.get('technical_notes', 'N/A')[:100]}")
 
@@ -510,7 +511,7 @@ JSON 형식으로 응답:
 """
 
         response = await self._call_llm(prompt, format="json")
-        code_result = json.loads(response)
+        code_result = self._parse_json(response)
 
         # 코드 검증 및 개선 제안
         validation_prompt = f"""다음 게임 코드를 검토하고 개선점을 제안하세요:
@@ -530,7 +531,7 @@ JSON 형식으로 응답:
 """
 
         validation_response = await self._call_llm(validation_prompt, format="json")
-        validation = json.loads(validation_response)
+        validation = self._parse_json(validation_response)
 
         return {
             "title": f"{step.name} - 게임 로직 구현",
@@ -568,7 +569,7 @@ JSON 형식으로 응답:
 """
 
         response = await self._call_llm(prompt, format="json")
-        result = json.loads(response)
+        result = self._parse_json(response)
 
         return {
             "title": f"{step.name} - 검토",
@@ -590,7 +591,7 @@ JSON 형식으로 응답:
 """
 
         response = await self._call_llm(prompt, format="json")
-        result = json.loads(response)
+        result = self._parse_json(response)
 
         return {
             "title": step.name,
@@ -636,7 +637,7 @@ JSON 형식으로 응답:
 """
 
         review_response = await self._call_llm(review_prompt, format="json")
-        review_data = json.loads(review_response)
+        review_data = self._parse_json(review_response)
 
         # 최종 검토 결과를 artifacts에 추가 (title 포함)
         artifacts["final_review"] = {
@@ -654,10 +655,18 @@ JSON 형식으로 응답:
         self.agent = await Agents.get_agent_by_id(self.agent_id)
         failed_step_id = None
 
-        for record in reversed(self.agent.execution_history):
-            if record.get("status") == "failed":
-                failed_step_id = record.get("step_id")
+        # 1순위: 계획(plan)에서 failed 상태인 단계
+        for step in (self.agent.plan or {}).get("steps", []):
+            if step.get("status") == "failed":
+                failed_step_id = step.get("step_id")
                 break
+
+        # 2순위: 실행 이력. 워크플로 수준 오류 기록(step_id="error")은 단계가 아니므로 제외
+        if not failed_step_id:
+            for record in reversed(self.agent.execution_history):
+                if record.get("status") == "failed" and record.get("step_id") != "error":
+                    failed_step_id = record.get("step_id")
+                    break
 
         if not failed_step_id:
             log.warning(f"No failed step found for agent {self.agent_id}")
@@ -680,6 +689,28 @@ JSON 형식으로 응답:
         await self.execute_plan()
 
     # Helper methods
+
+    @staticmethod
+    def _parse_json(response: str) -> Any:
+        """LLM JSON 응답 파싱: 코드 펜스 제거 후 파싱, 실패 시 원인이 드러나는 오류로 변환"""
+        text = (response or "").strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as e:
+            # 첫 '{' ~ 마지막 '}' 구간만 다시 시도 (앞뒤 설명문이 섞인 경우)
+            start, end = text.find("{"), text.rfind("}")
+            if start != -1 and end > start:
+                try:
+                    return json.loads(text[start : end + 1])
+                except json.JSONDecodeError:
+                    pass
+            raise RuntimeError(
+                f"LLM JSON 응답 파싱 실패 ({e.msg} at char {e.pos}, 응답 길이 {len(text)}). "
+                "응답이 잘렸다면 AGENT_NUM_CTX를 늘리세요."
+            ) from e
 
     async def _get_default_model(self) -> str:
         """에이전트가 사용할 LLM 모델 결정: agents.default_model > ui.default_models > env > 기본값"""
@@ -705,10 +736,16 @@ JSON 형식으로 응답:
             ollama_url = ollama_base_urls[0] if ollama_base_urls else "http://localhost:11434"
             model = await self._get_default_model()
 
+            # 기본 컨텍스트(4096)로는 이전 단계 결과를 포함한 프롬프트 + JSON 응답이 잘려서
+            # "Unterminated string" 파싱 오류가 나므로 컨텍스트를 넉넉히 잡는다.
             payload = {
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "stream": False,
+                "options": {
+                    "num_ctx": int(os.environ.get("AGENT_NUM_CTX", "16384")),
+                    "temperature": float(os.environ.get("AGENT_TEMPERATURE", "0.7")),
+                },
             }
 
             if format == "json":
@@ -718,7 +755,7 @@ JSON 형식으로 응답:
                 requests.post,
                 url=f"{ollama_url}/api/chat",
                 json=payload,
-                timeout=120,
+                timeout=int(os.environ.get("AGENT_LLM_TIMEOUT", "900")),
             )
 
             response.raise_for_status()

@@ -618,6 +618,7 @@ JSON만 출력:"""
             ],
             "stream": False,
             "options": {
+                "num_ctx": int(os.environ.get("AGENT_NUM_CTX", "16384")),
                 "temperature": 1.2,  # 매우 높은 temperature로 최대 다양성
                 "top_p": 0.95,
                 "top_k": 50,
@@ -629,7 +630,7 @@ JSON만 출력:"""
             async with session.post(
                 f"{ollama_url}/api/chat",
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=60)
+                timeout=aiohttp.ClientTimeout(total=int(os.environ.get("AGENT_LLM_TIMEOUT", "900")))
             ) as resp:
                 result = await resp.json()
                 response = result.get("message", {}).get("content", "")
