@@ -1,5 +1,7 @@
 import logging
 import asyncio
+import os
+import time
 from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -16,13 +18,12 @@ from open_webui.models.agents import (
     AgentPlanStep,
     AgentExecutionResult,
 )
+from open_webui.models.config import Config
 from open_webui.utils.auth import get_verified_user, get_admin_user
 from open_webui.constants import ERROR_MESSAGES
-from open_webui.env import SRC_LOG_LEVELS
 # AgentExecutor import will be done inside functions to avoid circular imports
 
 log = logging.getLogger(__name__)
-log.setLevel(SRC_LOG_LEVELS["MAIN"])
 
 router = APIRouter()
 
@@ -38,7 +39,7 @@ async def get_agents(
     user=Depends(get_verified_user),
 ):
     """사용자의 모든 에이전트 조회"""
-    return Agents.get_agents_by_user_id(user.id, skip=skip, limit=limit)
+    return await Agents.get_agents_by_user_id(user.id, skip=skip, limit=limit)
 
 
 @router.get("/{agent_id}", response_model=AgentModel)
@@ -47,7 +48,7 @@ async def get_agent_by_id(
     user=Depends(get_verified_user),
 ):
     """ID로 에이전트 조회"""
-    agent = Agents.get_agent_by_id(agent_id)
+    agent = await Agents.get_agent_by_id(agent_id)
 
     if not agent:
         raise HTTPException(
@@ -73,7 +74,7 @@ async def create_agent(
 ):
     """새 에이전트 생성"""
     try:
-        agent = Agents.insert_new_agent(user_id=user.id, form_data=form_data)
+        agent = await Agents.insert_new_agent(user_id=user.id, form_data=form_data)
 
         # auto_execute가 True인 경우에만 백그라운드에서 에이전트 실행
         if form_data.auto_execute:
@@ -103,7 +104,7 @@ async def update_agent(
     user=Depends(get_verified_user),
 ):
     """에이전트 업데이트"""
-    agent = Agents.get_agent_by_id(agent_id)
+    agent = await Agents.get_agent_by_id(agent_id)
 
     if not agent:
         raise HTTPException(
@@ -118,7 +119,7 @@ async def update_agent(
             detail=ERROR_MESSAGES.UNAUTHORIZED,
         )
 
-    updated_agent = Agents.update_agent_by_id(agent_id, form_data)
+    updated_agent = await Agents.update_agent_by_id(agent_id, form_data)
     return updated_agent
 
 
@@ -128,7 +129,7 @@ async def delete_agent(
     user=Depends(get_verified_user),
 ):
     """에이전트 삭제"""
-    agent = Agents.get_agent_by_id(agent_id)
+    agent = await Agents.get_agent_by_id(agent_id)
 
     if not agent:
         raise HTTPException(
@@ -143,7 +144,7 @@ async def delete_agent(
             detail=ERROR_MESSAGES.UNAUTHORIZED,
         )
 
-    result = Agents.delete_agent_by_id(agent_id)
+    result = await Agents.delete_agent_by_id(agent_id)
 
     if not result:
         raise HTTPException(
@@ -165,7 +166,7 @@ async def pause_agent(
     user=Depends(get_verified_user),
 ):
     """에이전트 일시정지"""
-    agent = Agents.get_agent_by_id(agent_id)
+    agent = await Agents.get_agent_by_id(agent_id)
 
     if not agent:
         raise HTTPException(
@@ -179,7 +180,7 @@ async def pause_agent(
             detail=ERROR_MESSAGES.UNAUTHORIZED,
         )
 
-    updated_agent = Agents.update_agent_status(agent_id, AgentStatus.PAUSED)
+    updated_agent = await Agents.update_agent_status(agent_id, AgentStatus.PAUSED)
     return updated_agent
 
 
@@ -190,7 +191,7 @@ async def resume_agent(
     user=Depends(get_verified_user),
 ):
     """에이전트 재개"""
-    agent = Agents.get_agent_by_id(agent_id)
+    agent = await Agents.get_agent_by_id(agent_id)
 
     if not agent:
         raise HTTPException(
@@ -219,7 +220,7 @@ async def resume_agent(
 
     asyncio.create_task(run_agent_safely())
 
-    return Agents.update_agent_status(agent_id, AgentStatus.EXECUTING)
+    return await Agents.update_agent_status(agent_id, AgentStatus.EXECUTING)
 
 
 @router.post("/{agent_id}/retry")
@@ -229,7 +230,7 @@ async def retry_agent(
     user=Depends(get_verified_user),
 ):
     """실패한 에이전트 재시도"""
-    agent = Agents.get_agent_by_id(agent_id)
+    agent = await Agents.get_agent_by_id(agent_id)
 
     if not agent:
         raise HTTPException(
@@ -258,7 +259,7 @@ async def retry_agent(
 
     asyncio.create_task(run_agent_safely())
 
-    return Agents.update_agent_status(agent_id, AgentStatus.PLANNING)
+    return await Agents.update_agent_status(agent_id, AgentStatus.PLANNING)
 
 
 @router.post("/{agent_id}/start")
@@ -268,7 +269,7 @@ async def start_agent(
     user=Depends(get_verified_user),
 ):
     """에이전트 시작"""
-    agent = Agents.get_agent_by_id(agent_id)
+    agent = await Agents.get_agent_by_id(agent_id)
 
     if not agent:
         raise HTTPException(
@@ -297,7 +298,7 @@ async def start_agent(
 
     asyncio.create_task(run_agent_safely())
 
-    return Agents.update_agent_status(agent_id, AgentStatus.PLANNING)
+    return await Agents.update_agent_status(agent_id, AgentStatus.PLANNING)
 
 
 ############################
@@ -311,7 +312,7 @@ async def get_agents_by_chat(
     user=Depends(get_verified_user),
 ):
     """채팅 ID로 에이전트 조회"""
-    agents = Agents.get_agents_by_chat_id(chat_id)
+    agents = await Agents.get_agents_by_chat_id(chat_id)
 
     # 권한 확인
     for agent in agents:
@@ -348,7 +349,7 @@ async def execute_agent_workflow(
         # Import here to avoid circular dependency
         from open_webui.utils.agent_executor import AgentExecutor
 
-        executor = AgentExecutor(request, agent_id, user)
+        executor = await AgentExecutor.create(request, agent_id, user)
 
         if retry:
             # 재시도 - 실패한 단계부터 재시작
@@ -368,11 +369,11 @@ async def execute_agent_workflow(
             await executor.final_review()
 
         # Mark as completed
-        Agents.update_agent_status(agent_id, AgentStatus.COMPLETED)
+        await Agents.update_agent_status(agent_id, AgentStatus.COMPLETED)
 
     except Exception as e:
         log.exception(f"Error executing agent workflow: {e}")
-        Agents.update_agent_status(agent_id, AgentStatus.FAILED)
+        await Agents.update_agent_status(agent_id, AgentStatus.FAILED)
 
         # Add error to execution history
         error_result = AgentExecutionResult(
@@ -380,9 +381,9 @@ async def execute_agent_workflow(
             status="failed",
             output={},
             error=str(e),
-            timestamp=int(asyncio.get_event_loop().time()),
+            timestamp=int(time.time()),
         )
-        Agents.add_execution_history(agent_id, error_result)
+        await Agents.add_execution_history(agent_id, error_result)
 
 
 ############################
@@ -592,11 +593,16 @@ JSON만 출력:"""
         # Ollama API 직접 호출로 temperature 제어
         import aiohttp
 
-        ollama_base_urls = request.app.state.config.OLLAMA_BASE_URLS
+        ollama_base_urls = await Config.get("ollama.base_urls", []) or []
         ollama_url = ollama_base_urls[0] if ollama_base_urls else "http://localhost:11434"
 
-        # gpt-oss:20b 모델 사용
-        model = "gpt-oss:20b"
+        # 에이전트 기본 모델 (agents.default_model 설정 > env > 기본값)
+        model = (
+            await Config.get("agents.default_model", None)
+            or os.environ.get("AGENT_DEFAULT_MODEL")
+            or os.environ.get("MODEL_DEFAULT")
+            or "gpt-oss:20b"
+        )
 
         payload = {
             "model": model,

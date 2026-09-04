@@ -19,6 +19,11 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade():
+    # 구버전(v0.6.15 기반) DB에는 agent 테이블이 이미 존재하므로 건너뜀
+    bind = op.get_bind()
+    if sa.inspect(bind).has_table("agent"):
+        return
+
     op.create_table(
         "agent",
         sa.Column("id", sa.String(), nullable=False, primary_key=True),

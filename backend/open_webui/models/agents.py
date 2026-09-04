@@ -5,19 +5,18 @@ import uuid
 from typing import Optional, List
 from enum import Enum
 
-from open_webui.internal.db import Base, get_db
-from open_webui.env import SRC_LOG_LEVELS
+from open_webui.internal.db import Base, get_async_db_context
 
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import BigInteger, Column, String, Text, JSON, Enum as SQLEnum
-from sqlalchemy import or_, func, select, and_
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 ####################
 # Agent DB Schema
 ####################
 
 log = logging.getLogger(__name__)
-log.setLevel(SRC_LOG_LEVELS["MODELS"])
 
 
 class AgentStatus(str, Enum):
@@ -157,21 +156,25 @@ class AgentExecutionResult(BaseModel):
 
 
 class Agents:
-    """에이전트 데이터베이스 작업"""
+    """에이전트 데이터베이스 작업 (async SQLAlchemy)"""
 
     @staticmethod
-    def insert_new_agent(
+    async def _get_agent_row(db: AsyncSession, agent_id: str) -> Optional[Agent]:
+        result = await db.execute(select(Agent).where(Agent.id == agent_id))
+        return result.scalars().first()
+
+    @staticmethod
+    async def insert_new_agent(
         user_id: str,
         form_data: AgentCreateForm,
+        db: Optional[AsyncSession] = None,
     ) -> Optional[AgentModel]:
         """새 에이전트 생성"""
-        with get_db() as db:
+        async with get_async_db_context(db) as db:
             try:
-                agent_id = str(uuid.uuid4())
                 timestamp = int(time.time())
-
                 agent = Agent(
-                    id=agent_id,
+                    id=str(uuid.uuid4()),
                     user_id=user_id,
                     chat_id=form_data.chat_id,
                     name=form_data.name,
@@ -188,60 +191,58 @@ class Agents:
                     updated_at=timestamp,
                     completed_at=None,
                 )
-
                 db.add(agent)
-                db.commit()
-                db.refresh(agent)
-
+                await db.commit()
+                await db.refresh(agent)
                 return AgentModel.model_validate(agent)
             except Exception as e:
-                db.rollback()
+                await db.rollback()
                 log.exception(f"Error creating new agent for user {user_id}: {e}")
                 return None
 
     @staticmethod
-    def get_agent_by_id(agent_id: str) -> Optional[AgentModel]:
+    async def get_agent_by_id(
+        agent_id: str, db: Optional[AsyncSession] = None
+    ) -> Optional[AgentModel]:
         """ID로 에이전트 조회"""
-        with get_db() as db:
-            agent = db.query(Agent).filter(Agent.id == agent_id).first()
+        async with get_async_db_context(db) as db:
+            agent = await Agents._get_agent_row(db, agent_id)
             return AgentModel.model_validate(agent) if agent else None
 
     @staticmethod
-    def get_agents_by_user_id(
-        user_id: str, skip: int = 0, limit: int = 50
+    async def get_agents_by_user_id(
+        user_id: str, skip: int = 0, limit: int = 50, db: Optional[AsyncSession] = None
     ) -> List[AgentModel]:
         """사용자의 모든 에이전트 조회"""
-        with get_db() as db:
-            agents = (
-                db.query(Agent)
-                .filter(Agent.user_id == user_id)
+        async with get_async_db_context(db) as db:
+            result = await db.execute(
+                select(Agent)
+                .where(Agent.user_id == user_id)
                 .order_by(Agent.created_at.desc())
                 .offset(skip)
                 .limit(limit)
-                .all()
             )
-            return [AgentModel.model_validate(agent) for agent in agents]
+            return [AgentModel.model_validate(a) for a in result.scalars().all()]
 
     @staticmethod
-    def get_agents_by_chat_id(chat_id: str) -> List[AgentModel]:
+    async def get_agents_by_chat_id(
+        chat_id: str, db: Optional[AsyncSession] = None
+    ) -> List[AgentModel]:
         """채팅 ID로 에이전트 조회"""
-        with get_db() as db:
-            agents = (
-                db.query(Agent)
-                .filter(Agent.chat_id == chat_id)
-                .order_by(Agent.created_at.desc())
-                .all()
+        async with get_async_db_context(db) as db:
+            result = await db.execute(
+                select(Agent).where(Agent.chat_id == chat_id).order_by(Agent.created_at.desc())
             )
-            return [AgentModel.model_validate(agent) for agent in agents]
+            return [AgentModel.model_validate(a) for a in result.scalars().all()]
 
     @staticmethod
-    def update_agent_by_id(
-        agent_id: str, form_data: AgentUpdateForm
+    async def update_agent_by_id(
+        agent_id: str, form_data: AgentUpdateForm, db: Optional[AsyncSession] = None
     ) -> Optional[AgentModel]:
         """에이전트 업데이트"""
-        with get_db() as db:
+        async with get_async_db_context(db) as db:
             try:
-                agent = db.query(Agent).filter(Agent.id == agent_id).first()
+                agent = await Agents._get_agent_row(db, agent_id)
                 if not agent:
                     return None
 
@@ -255,84 +256,88 @@ class Agents:
                 for key, value in update_data.items():
                     setattr(agent, key, value)
 
-                db.commit()
-                db.refresh(agent)
-
+                await db.commit()
+                await db.refresh(agent)
                 return AgentModel.model_validate(agent)
             except Exception as e:
-                db.rollback()
+                await db.rollback()
                 log.exception(f"Error updating agent {agent_id}: {e}")
                 return None
 
     @staticmethod
-    def update_agent_status(
-        agent_id: str, status: AgentStatus, current_step: Optional[str] = None
+    async def update_agent_status(
+        agent_id: str,
+        status: AgentStatus,
+        current_step: Optional[str] = None,
+        db: Optional[AsyncSession] = None,
     ) -> Optional[AgentModel]:
         """에이전트 상태 업데이트"""
         form_data = AgentUpdateForm(status=status, current_step=current_step)
-        return Agents.update_agent_by_id(agent_id, form_data)
+        return await Agents.update_agent_by_id(agent_id, form_data, db=db)
 
     @staticmethod
-    def add_execution_history(
-        agent_id: str, result: AgentExecutionResult
+    async def add_execution_history(
+        agent_id: str, result: AgentExecutionResult, db: Optional[AsyncSession] = None
     ) -> Optional[AgentModel]:
         """실행 이력 추가"""
-        with get_db() as db:
+        async with get_async_db_context(db) as db:
             try:
-                agent = db.query(Agent).filter(Agent.id == agent_id).first()
+                agent = await Agents._get_agent_row(db, agent_id)
                 if not agent:
                     return None
 
-                history = agent.execution_history.copy()
+                history = list(agent.execution_history or [])
                 history.append(result.model_dump())
-
                 agent.execution_history = history
                 agent.updated_at = int(time.time())
 
-                db.commit()
-                db.refresh(agent)
-
+                await db.commit()
+                await db.refresh(agent)
                 return AgentModel.model_validate(agent)
             except Exception as e:
-                db.rollback()
+                await db.rollback()
                 log.exception(f"Error adding execution history for agent {agent_id}: {e}")
                 return None
 
     @staticmethod
-    def update_plan(agent_id: str, plan: AgentPlan) -> Optional[AgentModel]:
+    async def update_plan(
+        agent_id: str, plan: AgentPlan, db: Optional[AsyncSession] = None
+    ) -> Optional[AgentModel]:
         """실행 계획 업데이트"""
-        with get_db() as db:
+        async with get_async_db_context(db) as db:
             try:
-                agent = db.query(Agent).filter(Agent.id == agent_id).first()
+                agent = await Agents._get_agent_row(db, agent_id)
                 if not agent:
                     return None
 
                 agent.plan = plan.model_dump()
                 agent.updated_at = int(time.time())
 
-                db.commit()
-                db.refresh(agent)
-
+                await db.commit()
+                await db.refresh(agent)
                 return AgentModel.model_validate(agent)
             except Exception as e:
-                db.rollback()
+                await db.rollback()
                 log.exception(f"Error updating plan for agent {agent_id}: {e}")
                 return None
 
     @staticmethod
-    def update_plan_step_status(
-        agent_id: str, step_id: str, step_status: str, result: Optional[dict] = None
+    async def update_plan_step_status(
+        agent_id: str,
+        step_id: str,
+        step_status: str,
+        result: Optional[dict] = None,
+        db: Optional[AsyncSession] = None,
     ) -> Optional[AgentModel]:
         """계획 단계 상태 업데이트"""
-        with get_db() as db:
+        async with get_async_db_context(db) as db:
             try:
-                agent = db.query(Agent).filter(Agent.id == agent_id).first()
+                agent = await Agents._get_agent_row(db, agent_id)
                 if not agent:
                     return None
 
-                plan = agent.plan.copy()
-                steps = plan.get("steps", [])
-
+                plan = dict(agent.plan or {})
+                steps = [dict(step) for step in plan.get("steps", [])]
                 for step in steps:
                     if step.get("step_id") == step_id:
                         step["status"] = step_status
@@ -340,67 +345,68 @@ class Agents:
                             step["result"] = result
                         log.info(f"Updated step {step_id} to status {step_status} in plan")
                         break
+                plan["steps"] = steps
 
                 agent.plan = plan
                 agent.updated_at = int(time.time())
 
-                db.commit()
-                db.refresh(agent)
-                log.info(f"Committed and refreshed agent {agent_id}")
-
+                await db.commit()
+                await db.refresh(agent)
                 return AgentModel.model_validate(agent)
             except Exception as e:
-                db.rollback()
-                log.exception(f"Error updating plan step status for agent {agent_id}, step {step_id}: {e}")
+                await db.rollback()
+                log.exception(
+                    f"Error updating plan step status for agent {agent_id}, step {step_id}: {e}"
+                )
                 return None
 
     @staticmethod
-    def update_artifacts(agent_id: str, artifacts: dict) -> Optional[AgentModel]:
+    async def update_artifacts(
+        agent_id: str, artifacts: dict, db: Optional[AsyncSession] = None
+    ) -> Optional[AgentModel]:
         """결과물 업데이트"""
-        with get_db() as db:
+        async with get_async_db_context(db) as db:
             try:
-                agent = db.query(Agent).filter(Agent.id == agent_id).first()
+                agent = await Agents._get_agent_row(db, agent_id)
                 if not agent:
                     return None
 
                 agent.artifacts = artifacts
                 agent.updated_at = int(time.time())
 
-                db.commit()
-                db.refresh(agent)
-
+                await db.commit()
+                await db.refresh(agent)
                 return AgentModel.model_validate(agent)
             except Exception as e:
-                db.rollback()
+                await db.rollback()
                 log.exception(f"Error updating artifacts for agent {agent_id}: {e}")
                 return None
 
     @staticmethod
-    def delete_agent_by_id(agent_id: str) -> bool:
+    async def delete_agent_by_id(agent_id: str, db: Optional[AsyncSession] = None) -> bool:
         """에이전트 삭제"""
-        with get_db() as db:
+        async with get_async_db_context(db) as db:
             try:
-                agent = db.query(Agent).filter(Agent.id == agent_id).first()
+                agent = await Agents._get_agent_row(db, agent_id)
                 if not agent:
                     return False
-
-                db.delete(agent)
-                db.commit()
+                await db.delete(agent)
+                await db.commit()
                 return True
             except Exception as e:
-                db.rollback()
+                await db.rollback()
                 log.exception(f"Error deleting agent {agent_id}: {e}")
                 return False
 
     @staticmethod
-    def delete_agents_by_user_id(user_id: str) -> bool:
+    async def delete_agents_by_user_id(user_id: str, db: Optional[AsyncSession] = None) -> bool:
         """사용자의 모든 에이전트 삭제"""
-        with get_db() as db:
+        async with get_async_db_context(db) as db:
             try:
-                db.query(Agent).filter(Agent.user_id == user_id).delete()
-                db.commit()
+                await db.execute(delete(Agent).where(Agent.user_id == user_id))
+                await db.commit()
                 return True
             except Exception as e:
-                db.rollback()
+                await db.rollback()
                 log.exception(f"Error deleting agents for user {user_id}: {e}")
                 return False

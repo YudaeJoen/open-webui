@@ -14,8 +14,12 @@ import time
 import asyncio
 from typing import Optional, Dict, List, Any
 
+import os
+
 import requests
 from fastapi import Request
+
+from open_webui.models.config import Config
 
 from open_webui.models.agents import (
     Agents,
@@ -26,23 +30,26 @@ from open_webui.models.agents import (
     AgentPlanStep,
     AgentExecutionResult,
 )
-from open_webui.env import SRC_LOG_LEVELS
 
 log = logging.getLogger(__name__)
-log.setLevel(SRC_LOG_LEVELS["MODELS"])
 
 
 class AgentExecutor:
     """에이전트 실행 엔진"""
 
-    def __init__(self, request: Request, agent_id: str, user):
+    def __init__(self, request: Request, agent_id: str, user, agent=None):
         self.request = request
         self.agent_id = agent_id
         self.user = user
-        self.agent = Agents.get_agent_by_id(agent_id)
+        self.agent = agent
 
-        if not self.agent:
+    @classmethod
+    async def create(cls, request: Request, agent_id: str, user) -> "AgentExecutor":
+        """DB에서 에이전트를 로드하여 실행기를 생성합니다 (async 팩토리)."""
+        agent = await Agents.get_agent_by_id(agent_id)
+        if not agent:
             raise ValueError(f"Agent {agent_id} not found")
+        return cls(request, agent_id, user, agent)
 
     async def create_plan(self) -> AgentPlan:
         """
@@ -55,7 +62,7 @@ class AgentExecutor:
         - FULL_DEVELOPMENT: 전체 개발 단계들 (기획 -> 이미지 -> 로직)
         """
         log.info(f"Creating plan for agent {self.agent_id}")
-        Agents.update_agent_status(self.agent_id, AgentStatus.PLANNING)
+        await Agents.update_agent_status(self.agent_id, AgentStatus.PLANNING)
 
         try:
             # LLM에게 플랜 생성 요청
@@ -73,7 +80,7 @@ class AgentExecutor:
             )
 
             # 플랜 저장
-            Agents.update_plan(self.agent_id, plan)
+            await Agents.update_plan(self.agent_id, plan)
 
             log.info(f"Plan created with {len(plan.steps)} steps")
             return plan
@@ -175,10 +182,10 @@ JSON 형식으로 응답하세요:
     async def execute_plan(self, start_from_step: Optional[str] = None):
         """실행 계획을 순서대로 실행합니다."""
         log.info(f"Executing plan for agent {self.agent_id}")
-        Agents.update_agent_status(self.agent_id, AgentStatus.EXECUTING)
+        await Agents.update_agent_status(self.agent_id, AgentStatus.EXECUTING)
 
         # 최신 에이전트 정보 가져오기
-        self.agent = Agents.get_agent_by_id(self.agent_id)
+        self.agent = await Agents.get_agent_by_id(self.agent_id)
         plan_data = self.agent.plan
 
         if not plan_data or not plan_data.get("steps"):
@@ -197,7 +204,7 @@ JSON 형식으로 응답하세요:
 
         for step in steps[start_index:]:
             # 일시정지 확인
-            self.agent = Agents.get_agent_by_id(self.agent_id)
+            self.agent = await Agents.get_agent_by_id(self.agent_id)
             if self.agent.status == AgentStatus.PAUSED:
                 log.info(f"Agent {self.agent_id} paused at step {step.step_id}")
                 return
@@ -210,14 +217,14 @@ JSON 형식으로 응답하세요:
         log.info(f"Executing step {step.step_id}: {step.name}")
 
         from open_webui.models.agents import AgentUpdateForm
-        Agents.update_agent_by_id(
+        await Agents.update_agent_by_id(
             self.agent_id,
             AgentUpdateForm(current_step=step.step_id)
         )
 
         # 스텝 상태를 in_progress로 업데이트
         log.info(f"Updating step {step.step_id} status to in_progress")
-        update_result = Agents.update_plan_step_status(self.agent_id, step.step_id, "in_progress")
+        update_result = await Agents.update_plan_step_status(self.agent_id, step.step_id, "in_progress")
         log.info(f"Update result for in_progress: {update_result is not None}")
 
         try:
@@ -248,14 +255,14 @@ JSON 형식으로 응답하세요:
                 error=None,
                 timestamp=int(time.time()),
             )
-            Agents.add_execution_history(self.agent_id, execution_result)
+            await Agents.add_execution_history(self.agent_id, execution_result)
 
             # 결과물 업데이트
-            self._update_artifacts(step.step_id, result)
+            await self._update_artifacts(step.step_id, result)
 
             # 스텝 상태를 completed로 업데이트
             log.info(f"Updating step {step.step_id} status to completed")
-            update_result = Agents.update_plan_step_status(self.agent_id, step.step_id, "completed", result)
+            update_result = await Agents.update_plan_step_status(self.agent_id, step.step_id, "completed", result)
             log.info(f"Update result for completed: {update_result is not None}")
 
             log.info(f"Step {step.step_id} completed successfully")
@@ -265,7 +272,7 @@ JSON 형식으로 응답하세요:
 
             # 스텝 상태를 failed로 업데이트
             log.info(f"Updating step {step.step_id} status to failed")
-            update_result = Agents.update_plan_step_status(self.agent_id, step.step_id, "failed")
+            update_result = await Agents.update_plan_step_status(self.agent_id, step.step_id, "failed")
             log.info(f"Update result for failed: {update_result is not None}")
 
             execution_result = AgentExecutionResult(
@@ -275,7 +282,7 @@ JSON 형식으로 응답하세요:
                 error=str(e),
                 timestamp=int(time.time()),
             )
-            Agents.add_execution_history(self.agent_id, execution_result)
+            await Agents.add_execution_history(self.agent_id, execution_result)
             raise
 
     async def _execute_design_step(self, step: AgentPlanStep) -> Dict[str, Any]:
@@ -593,10 +600,10 @@ JSON 형식으로 응답:
     async def final_review(self):
         """최종 검토 및 결과물 정리"""
         log.info(f"Performing final review for agent {self.agent_id}")
-        Agents.update_agent_status(self.agent_id, AgentStatus.REVIEWING)
+        await Agents.update_agent_status(self.agent_id, AgentStatus.REVIEWING)
 
         # 모든 결과물 가져오기
-        self.agent = Agents.get_agent_by_id(self.agent_id)
+        self.agent = await Agents.get_agent_by_id(self.agent_id)
         artifacts = self.agent.artifacts
 
         # LLM에게 최종 검토 요청
@@ -637,14 +644,14 @@ JSON 형식으로 응답:
             **review_data
         }
 
-        Agents.update_artifacts(self.agent_id, artifacts)
+        await Agents.update_artifacts(self.agent_id, artifacts)
 
         log.info(f"Final review completed for agent {self.agent_id}")
 
     async def retry_from_failed_step(self):
         """실패한 단계부터 재시도"""
         # 실행 이력에서 실패한 단계 찾기
-        self.agent = Agents.get_agent_by_id(self.agent_id)
+        self.agent = await Agents.get_agent_by_id(self.agent_id)
         failed_step_id = None
 
         for record in reversed(self.agent.execution_history):
@@ -662,7 +669,7 @@ JSON 형식으로 응답:
 
     async def resume_from_paused_step(self):
         """일시정지된 단계부터 재개"""
-        self.agent = Agents.get_agent_by_id(self.agent_id)
+        self.agent = await Agents.get_agent_by_id(self.agent_id)
         current_step = self.agent.current_step
 
         if not current_step:
@@ -674,36 +681,29 @@ JSON 형식으로 응답:
 
     # Helper methods
 
-    async def _call_llm(self, prompt: str, format: str = "text") -> str:
-        """LLM 호출"""
-        try:
-            ollama_base_urls = self.request.app.state.config.OLLAMA_BASE_URLS
-            ollama_url = ollama_base_urls[0] if ollama_base_urls else "http://localhost:11434"
+    async def _get_default_model(self) -> str:
+        """에이전트가 사용할 LLM 모델 결정: agents.default_model > ui.default_models > env > 기본값"""
+        model = await Config.get("agents.default_model", None)
+        if not model:
+            default_models = await Config.get("ui.default_models", None)
+            if isinstance(default_models, str) and default_models.strip():
+                model = default_models.split(",")[0].strip()
+            elif isinstance(default_models, list) and default_models:
+                model = default_models[0]
+        if not model:
+            model = (
+                os.environ.get("AGENT_DEFAULT_MODEL")
+                or os.environ.get("MODEL_DEFAULT")
+                or "gpt-oss:20b"
+            )
+        return model
 
-            # 기본 모델 가져오기 (설정에서)
-            model = None
-            try:
-                model = getattr(self.request.app.state.config, 'MODEL_DEFAULT', None)
-            except (AttributeError, KeyError):
-                pass
-            
-            if not model:
-                try:
-                    # DEFAULT_MODELS에서 첫 번째 모델 사용
-                    default_models = getattr(self.request.app.state.config, 'DEFAULT_MODELS', None)
-                    if default_models and isinstance(default_models, list) and len(default_models) > 0:
-                        model = default_models[0]
-                except (AttributeError, KeyError):
-                    pass
-                
-                if not model:
-                    # 환경 변수에서 가져오기
-                    import os
-                    model = os.environ.get('MODEL_DEFAULT', None)
-                    
-                    if not model:
-                        # 최후의 기본값
-                        model = "gpt-oss:20b"
+    async def _call_llm(self, prompt: str, format: str = "text") -> str:
+        """LLM 호출 (Ollama /api/chat 직접 호출)"""
+        try:
+            ollama_base_urls = await Config.get("ollama.base_urls", []) or []
+            ollama_url = ollama_base_urls[0] if ollama_base_urls else "http://localhost:11434"
+            model = await self._get_default_model()
 
             payload = {
                 "model": model,
@@ -726,15 +726,15 @@ JSON 형식으로 응답:
             return result.get("message", {}).get("content", "")
         except requests.exceptions.Timeout as e:
             log.exception(f"LLM call timeout: {e}")
-            Agents.update_agent_status(self.agent_id, AgentStatus.FAILED)
+            await Agents.update_agent_status(self.agent_id, AgentStatus.FAILED)
             raise RuntimeError(f"LLM 호출 시간 초과: {str(e)}")
         except requests.exceptions.RequestException as e:
             log.exception(f"LLM call failed: {e}")
-            Agents.update_agent_status(self.agent_id, AgentStatus.FAILED)
+            await Agents.update_agent_status(self.agent_id, AgentStatus.FAILED)
             raise RuntimeError(f"LLM 호출 실패: {str(e)}")
         except Exception as e:
             log.exception(f"Error calling LLM: {e}")
-            Agents.update_agent_status(self.agent_id, AgentStatus.FAILED)
+            await Agents.update_agent_status(self.agent_id, AgentStatus.FAILED)
             raise
 
     async def _generate_images(self, prompt: str, negative_prompt: str = "low quality, blurry, distorted", count: int = 1) -> List[str]:
@@ -780,98 +780,122 @@ JSON 형식으로 응답:
             # 오류 발생시 빈 리스트 반환
             return []
 
+    IMAGE_CONFIG_KEYS = (
+        "image_generation.enable",
+        "image_generation.engine",
+        "image_generation.automatic1111.base_url",
+        "image_generation.automatic1111.api_auth",
+        "image_generation.automatic1111.api_params",
+        "image_generation.size",
+        "image_generation.steps",
+    )
+
+    async def _get_image_config(self) -> Dict[str, Any]:
+        """이미지 생성 관련 설정을 DB(Config)에서 읽어옵니다."""
+        return await Config.get_many(*self.IMAGE_CONFIG_KEYS)
+
+    async def _run_txt2img(self, data: Dict[str, Any], metadata: Dict[str, Any]) -> List[str]:
+        """AUTOMATIC1111 txt2img 호출 후 결과 이미지를 파일로 저장하고 URL 목록을 반환합니다."""
+        from types import SimpleNamespace
+        from open_webui.routers.images import (
+            get_automatic1111_api_auth,
+            get_image_data,
+            upload_image,
+        )
+
+        cfg = await self._get_image_config()
+
+        if not cfg.get("image_generation.enable"):
+            log.warning("Image generation is disabled in config")
+            return []
+
+        engine = cfg.get("image_generation.engine") or ""
+        if engine not in ("automatic1111", ""):
+            log.warning(f"Unsupported image generation engine for agent: {engine}")
+            return []
+
+        base_url = (cfg.get("image_generation.automatic1111.base_url") or "").rstrip("/")
+        if not base_url:
+            log.warning("AUTOMATIC1111_BASE_URL is not configured")
+            return []
+
+        # 관리자 화면의 AUTOMATIC1111_PARAMS(JSON)를 기본값으로 깔고, 에이전트가 정한 값이 우선
+        api_params = cfg.get("image_generation.automatic1111.api_params") or {}
+        if isinstance(api_params, str):
+            try:
+                api_params = json.loads(api_params) if api_params.strip() else {}
+            except json.JSONDecodeError:
+                log.warning("AUTOMATIC1111_PARAMS is not valid JSON, ignoring")
+                api_params = {}
+        payload = {**api_params, **data}
+
+        api_auth = cfg.get("image_generation.automatic1111.api_auth") or None
+        auth_header = get_automatic1111_api_auth(SimpleNamespace(AUTOMATIC1111_API_AUTH=api_auth))
+        headers = {"authorization": auth_header} if auth_header else {}
+
+        log.info(f"Calling Automatic1111 API at {base_url}")
+        log.info(f"Prompt: {str(payload.get('prompt', ''))[:200]}...")
+        log.info(
+            f"Size: {payload.get('width')}x{payload.get('height')}, steps={payload.get('steps')}, "
+            f"cfg={payload.get('cfg_scale')}, sampler={payload.get('sampler_name')}"
+        )
+
+        response = await asyncio.to_thread(
+            requests.post,
+            url=f"{base_url}/sdapi/v1/txt2img",
+            json=payload,
+            headers=headers,
+            timeout=300,
+        )
+        response.raise_for_status()
+        result = response.json()
+
+        image_urls: List[str] = []
+        for idx, base64_image in enumerate(result.get("images", [])):
+            image_data, content_type = await get_image_data(base64_image)
+            if not image_data:
+                log.warning(f"Failed to decode image {idx + 1}")
+                continue
+
+            _, image_file = await upload_image(
+                self.request,
+                image_data,
+                content_type,
+                {
+                    **metadata,
+                    "agent_id": self.agent_id,
+                    "step": self.agent.current_step if self.agent else None,
+                },
+                self.user,
+            )
+            image_urls.append(image_file["url"])
+            log.info(f"Image {idx + 1} uploaded: {image_file['url']}")
+
+        return image_urls
+
     async def _call_image_generation_api(
         self, prompt: str, negative_prompt: str, count: int = 1
     ) -> List[str]:
-        """이미지 생성 API 호출"""
+        """이미지 생성 API 호출 (기본 설정)"""
         try:
-            from open_webui.routers.images import load_b64_image_data
-            import mimetypes
-            from fastapi import UploadFile
-            import io
+            cfg = await self._get_image_config()
 
-            # 이미지 생성이 활성화되어 있는지 확인
-            if not self.request.app.state.config.ENABLE_IMAGE_GENERATION:
-                log.warning("Image generation is disabled in config")
-                return []
+            try:
+                width, height = map(int, str(cfg.get("image_generation.size") or "512x512").split("x"))
+            except Exception:
+                width, height = 512, 512
 
-            # 직접 Stable Diffusion API 호출
-            if self.request.app.state.config.IMAGE_GENERATION_ENGINE == "automatic1111":
-                base_url = self.request.app.state.config.AUTOMATIC1111_BASE_URL
-
-                if not base_url:
-                    log.warning("AUTOMATIC1111_BASE_URL is not configured")
-                    return []
-
-                # 이미지 크기 설정
-                try:
-                    width, height = map(
-                        int, self.request.app.state.config.IMAGE_SIZE.split("x")
-                    )
-                except:
-                    width, height = 512, 512  # 기본값
-
-                data = {
-                    "prompt": prompt,
-                    "negative_prompt": negative_prompt,
-                    "width": width,
-                    "height": height,
-                    "steps": self.request.app.state.config.IMAGE_STEPS or 30,
-                    "batch_size": count,
-                }
-
-                log.info(f"Calling Automatic1111 API at {base_url}")
-                response = await asyncio.to_thread(
-                    requests.post,
-                    url=f"{base_url}/sdapi/v1/txt2img",
-                    json=data,
-                    timeout=300,
-                )
-
-                response.raise_for_status()
-                result = response.json()
-
-                # 이미지를 파일로 저장하고 URL 반환
-                image_urls = []
-                for idx, base64_image in enumerate(result.get("images", [])):
-                    # base64 데이터 디코딩
-                    image_data, content_type = load_b64_image_data(base64_image)
-
-                    if image_data:
-                        # 파일 업로드
-                        image_format = mimetypes.guess_extension(content_type) or ".png"
-                        timestamp = int(time.time() * 1000)
-                        file = UploadFile(
-                            file=io.BytesIO(image_data),
-                            filename=f"agent-{self.agent_id}-{timestamp}-{idx}{image_format}",
-                            headers={
-                                "content-type": content_type,
-                            },
-                        )
-
-                        # upload_file 함수 사용
-                        from open_webui.routers.files import upload_file
-                        file_item = upload_file(
-                            self.request,
-                            file,
-                            metadata={
-                                "prompt": prompt,
-                                "negative_prompt": negative_prompt,
-                                "agent_id": self.agent_id,
-                                "step": self.agent.current_step
-                            },
-                            internal=True,
-                            user=self.user
-                        )
-                        url = self.request.app.url_path_for("get_file_content_by_id", id=file_item.id)
-                        image_urls.append(url)
-                        log.info(f"Image {idx+1}/{count} uploaded: {url}")
-
-                return image_urls
-            else:
-                log.warning(f"Unsupported image generation engine: {self.request.app.state.config.IMAGE_GENERATION_ENGINE}")
-                return []
-
+            data = {
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "width": width,
+                "height": height,
+                "steps": cfg.get("image_generation.steps") or 30,
+                "batch_size": count,
+            }
+            return await self._run_txt2img(
+                data, {"prompt": prompt, "negative_prompt": negative_prompt}
+            )
         except requests.exceptions.Timeout as e:
             log.exception(f"Image generation API timeout: {e}")
             return []
@@ -885,113 +909,37 @@ JSON 형식으로 응답:
     async def _call_image_generation_api_with_settings(self, sd_settings: Dict[str, Any]) -> List[str]:
         """이미지 생성 API 호출 (최적화된 설정 사용 - LoRA, sampler 등 포함)"""
         try:
-            from open_webui.routers.images import load_b64_image_data
-            import mimetypes
-            from fastapi import UploadFile
-            import io
+            prompt = sd_settings.get("prompt", "")
+            negative_prompt = sd_settings.get("negative_prompt", "low quality, blurry, distorted")
+            lora_models = sd_settings.get("lora_models", []) or []
 
-            # 이미지 생성이 활성화되어 있는지 확인
-            if not self.request.app.state.config.ENABLE_IMAGE_GENERATION:
-                log.warning("Image generation is disabled in config")
-                return []
+            # LoRA 프롬프트 추가 (AUTOMATIC1111 형식: <lora:model_name:weight>)
+            lora_prompt = ""
+            for lora in lora_models:
+                lora_name = lora.get("name", "")
+                lora_weight = lora.get("weight", 1.0)
+                if lora_name:
+                    lora_prompt += f" <lora:{lora_name}:{lora_weight}>"
+            final_prompt = prompt + lora_prompt
 
-            # 직접 Stable Diffusion API 호출
-            if self.request.app.state.config.IMAGE_GENERATION_ENGINE == "automatic1111":
-                base_url = self.request.app.state.config.AUTOMATIC1111_BASE_URL
-
-                if not base_url:
-                    log.warning("AUTOMATIC1111_BASE_URL is not configured")
-                    return []
-
-                # SD 설정에서 값 추출
-                prompt = sd_settings.get("prompt", "")
-                negative_prompt = sd_settings.get("negative_prompt", "low quality, blurry, distorted")
-                steps = sd_settings.get("steps", 50)
-                cfg_scale = sd_settings.get("cfg_scale", 7.5)
-                sampler_name = sd_settings.get("sampler_name", "DPM++ 2M Karras")
-                width = sd_settings.get("width", 512)
-                height = sd_settings.get("height", 512)
-                lora_models = sd_settings.get("lora_models", [])
-
-                # LoRA 프롬프트 추가 (AUTOMATIC1111 형식: <lora:model_name:weight>)
-                lora_prompt = ""
-                for lora in lora_models:
-                    lora_name = lora.get("name", "")
-                    lora_weight = lora.get("weight", 1.0)
-                    if lora_name:
-                        lora_prompt += f" <lora:{lora_name}:{lora_weight}>"
-
-                # 최종 프롬프트에 LoRA 추가
-                final_prompt = prompt + lora_prompt
-
-                data = {
+            data = {
+                "prompt": final_prompt,
+                "negative_prompt": negative_prompt,
+                "width": sd_settings.get("width", 512),
+                "height": sd_settings.get("height", 512),
+                "steps": sd_settings.get("steps", 50),
+                "cfg_scale": sd_settings.get("cfg_scale", 7.5),
+                "sampler_name": sd_settings.get("sampler_name", "DPM++ 2M Karras"),
+                "batch_size": 1,  # 한 번에 1개씩 생성
+            }
+            return await self._run_txt2img(
+                data,
+                {
                     "prompt": final_prompt,
                     "negative_prompt": negative_prompt,
-                    "width": width,
-                    "height": height,
-                    "steps": steps,
-                    "cfg_scale": cfg_scale,
-                    "sampler_name": sampler_name,
-                    "batch_size": 1,  # 한 번에 1개씩 생성
-                }
-
-                log.info(f"Calling Automatic1111 API with optimized settings")
-                log.info(f"Prompt: {final_prompt[:200]}...")
-                log.info(f"Steps: {steps}, CFG: {cfg_scale}, Sampler: {sampler_name}")
-                log.info(f"Size: {width}x{height}")
-
-                response = await asyncio.to_thread(
-                    requests.post,
-                    url=f"{base_url}/sdapi/v1/txt2img",
-                    json=data,
-                    timeout=300,
-                )
-
-                response.raise_for_status()
-                result = response.json()
-
-                # 이미지를 파일로 저장하고 URL 반환
-                image_urls = []
-                for idx, base64_image in enumerate(result.get("images", [])):
-                    # base64 데이터 디코딩
-                    image_data, content_type = load_b64_image_data(base64_image)
-
-                    if image_data:
-                        # 파일 업로드
-                        image_format = mimetypes.guess_extension(content_type) or ".png"
-                        timestamp = int(time.time() * 1000)
-                        file = UploadFile(
-                            file=io.BytesIO(image_data),
-                            filename=f"agent-{self.agent_id}-{timestamp}-{idx}{image_format}",
-                            headers={
-                                "content-type": content_type,
-                            },
-                        )
-
-                        # upload_file 함수 사용
-                        from open_webui.routers.files import upload_file
-                        file_item = upload_file(
-                            self.request,
-                            file,
-                            metadata={
-                                "prompt": final_prompt,
-                                "negative_prompt": negative_prompt,
-                                "agent_id": self.agent_id,
-                                "step": self.agent.current_step,
-                                "sd_settings": sd_settings  # 전체 SD 설정 저장
-                            },
-                            internal=True,
-                            user=self.user
-                        )
-                        url = self.request.app.url_path_for("get_file_content_by_id", id=file_item.id)
-                        image_urls.append(url)
-                        log.info(f"Image uploaded with optimized settings: {url}")
-
-                return image_urls
-            else:
-                log.warning(f"Unsupported image generation engine: {self.request.app.state.config.IMAGE_GENERATION_ENGINE}")
-                return []
-
+                    "sd_settings": sd_settings,  # 전체 SD 설정 저장
+                },
+            )
         except requests.exceptions.Timeout as e:
             log.exception(f"Image generation API timeout: {e}")
             return []
@@ -1028,11 +976,11 @@ JSON 형식으로 응답:
 
         return results
 
-    def _update_artifacts(self, step_id: str, result: Dict[str, Any]):
+    async def _update_artifacts(self, step_id: str, result: Dict[str, Any]):
         """결과물 업데이트"""
-        self.agent = Agents.get_agent_by_id(self.agent_id)
+        self.agent = await Agents.get_agent_by_id(self.agent_id)
         artifacts = self.agent.artifacts.copy()
 
         artifacts[step_id] = result
 
-        Agents.update_artifacts(self.agent_id, artifacts)
+        await Agents.update_artifacts(self.agent_id, artifacts)

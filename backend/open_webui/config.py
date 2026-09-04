@@ -60,6 +60,48 @@ logging.getLogger('uvicorn.access').addFilter(EndpointFilter())
 ####################################
 
 
+LEGACY_AGENT_REVISION = 'd4e8b9c3a1f0'  # Myme AI agent 테이블 (v0.6.15 시절에는 9f0c9cd09105 뒤였음)
+LEGACY_AGENT_PARENT_REVISION = '9f0c9cd09105'  # note 테이블 (업스트림 v0.6.15 head)
+
+
+def _restamp_legacy_agent_revision(alembic_cfg, command):
+    """Myme AI 포크 전용 보정.
+
+    v0.6.15 기반 DB는 alembic_version이 LEGACY_AGENT_REVISION(agent 테이블)로 찍혀 있다.
+    업스트림 업그레이드 과정에서 이 리비전을 최신 업스트림 head 뒤로 재연결했기 때문에,
+    그대로 두면 Alembic이 DB를 이미 head라고 판단해 업스트림 마이그레이션 전부를 건너뛴다.
+    chat.timer_at(업스트림 최신 리비전이 추가하는 컬럼)이 없으면 구버전 DB로 보고
+    LEGACY_AGENT_PARENT_REVISION으로 stamp해 정상 체인을 타게 한다.
+    """
+    try:
+        from sqlalchemy import create_engine, inspect, text
+
+        engine = create_engine(DATABASE_URL)
+        try:
+            inspector = inspect(engine)
+            if not inspector.has_table('alembic_version') or not inspector.has_table('chat'):
+                return
+            with engine.connect() as conn:
+                versions = [row[0] for row in conn.execute(text('SELECT version_num FROM alembic_version'))]
+            if versions != [LEGACY_AGENT_REVISION]:
+                return
+            chat_columns = {col['name'] for col in inspector.get_columns('chat')}
+            if 'timer_at' in chat_columns:
+                return
+        finally:
+            engine.dispose()
+
+        log.warning(
+            'Legacy Myme AI database detected (alembic_version=%s without upstream schema); '
+            'restamping to %s so upstream migrations run',
+            LEGACY_AGENT_REVISION,
+            LEGACY_AGENT_PARENT_REVISION,
+        )
+        command.stamp(alembic_cfg, LEGACY_AGENT_PARENT_REVISION)
+    except Exception as e:
+        log.exception(f'Legacy agent revision check failed (continuing): {e}')
+
+
 def run_migrations():
     log.info('Running migrations')
     try:
@@ -71,6 +113,7 @@ def run_migrations():
         migrations_path = OPEN_WEBUI_DIR / 'migrations'
         alembic_cfg.set_main_option('script_location', str(migrations_path))
 
+        _restamp_legacy_agent_revision(alembic_cfg, command)
         command.upgrade(alembic_cfg, 'head')
     except Exception as e:
         log.exception(f'Error running migrations: {e}')
@@ -1658,6 +1701,9 @@ DEFAULT_LOCALE = os.getenv('DEFAULT_LOCALE', '')
 
 DEFAULT_MODELS = os.getenv('DEFAULT_MODELS', None)
 
+# Myme AI: 게임 에이전트가 Ollama 호출에 사용할 기본 모델 (MODEL_DEFAULT는 구버전 호환)
+AGENT_DEFAULT_MODEL = os.getenv('AGENT_DEFAULT_MODEL', os.getenv('MODEL_DEFAULT', 'gpt-oss:20b'))
+
 DEFAULT_PINNED_MODELS = os.getenv('DEFAULT_PINNED_MODELS', None)
 
 try:
@@ -3093,6 +3139,7 @@ DEFAULT_CONFIG = {
     'ui.enable_password_change_form': ENABLE_PASSWORD_CHANGE_FORM,
     'ui.default_locale': DEFAULT_LOCALE,
     'ui.default_models': DEFAULT_MODELS,
+    'agents.default_model': AGENT_DEFAULT_MODEL,
     'ui.default_pinned_models': DEFAULT_PINNED_MODELS,
     'ui.default_interface_settings': DEFAULT_INTERFACE_SETTINGS,
     'ui.prompt_suggestions': DEFAULT_PROMPT_SUGGESTIONS,
