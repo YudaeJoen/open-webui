@@ -949,6 +949,10 @@ DEFAULT_MODELS = PersistentConfig(
     "DEFAULT_MODELS", "ui.default_models", os.environ.get("DEFAULT_MODELS", None)
 )
 
+MODEL_DEFAULT = PersistentConfig(
+    "MODEL_DEFAULT", "models.default", os.environ.get("MODEL_DEFAULT", "gpt-oss:20b")
+)
+
 try:
     default_prompt_suggestions = json.loads(
         os.environ.get("DEFAULT_PROMPT_SUGGESTIONS", "[]")
@@ -1410,18 +1414,38 @@ IMAGE_PROMPT_GENERATION_PROMPT_TEMPLATE = PersistentConfig(
 )
 
 DEFAULT_IMAGE_PROMPT_GENERATION_PROMPT_TEMPLATE = """### Task:
-Generate a detailed prompt for am image generation task based on the given language and context. Describe the image as if you were explaining it to someone who cannot see it. Include relevant details, colors, shapes, and any other important elements.
+Generate a detailed prompt for a Stable Diffusion image generation task based on the given context. Also recommend optimal generation settings based on the image type.
 
 ### Guidelines:
-- Be descriptive and detailed, focusing on the most important aspects of the image.
-- Avoid making assumptions or adding information not present in the image.
-- Use the chat's primary language; default to English if multilingual.
-- If the image is too complex, focus on the most prominent elements.
+- ALWAYS generate the prompt in English, regardless of the input language.
+- Be descriptive and detailed, using Stable Diffusion prompt syntax (comma-separated tags, quality boosters, etc.).
+- Include style, lighting, composition, and quality tags as appropriate.
+- Recommend settings based on image type:
+  - Portraits: steps 25-35, cfg_scale 7-8, restore_faces true
+  - Landscapes: steps 30-40, cfg_scale 6-7, larger width
+  - Anime/Illustration: steps 20-30, cfg_scale 7-9, clip_skip 2
+  - Photorealistic: steps 30-50, cfg_scale 5-7, hires fix recommended
+  - Abstract/Artistic: steps 40-60, cfg_scale 8-12
 
 ### Output:
 Strictly return in JSON format:
 {
-    "prompt": "Your detailed description here."
+    "prompt": "masterpiece, best quality, detailed prompt in English here...",
+    "negative_prompt": "low quality, bad anatomy, blurry...",
+    "settings": {
+        "steps": 30,
+        "cfg_scale": 7.0,
+        "sampler_name": "DPM++ 2M",
+        "scheduler": "Karras",
+        "width": 512,
+        "height": 768,
+        "seed": -1,
+        "enable_hr": false,
+        "hr_scale": 1.5,
+        "denoising_strength": 0.5,
+        "restore_faces": false,
+        "clip_skip": 1
+    }
 }
 
 ### Chat History:
@@ -2697,6 +2721,91 @@ AUTOMATIC1111_SCHEDULER = PersistentConfig(
         if os.environ.get("AUTOMATIC1111_SCHEDULER")
         else None
     ),
+)
+
+# Additional AUTOMATIC1111 settings
+AUTOMATIC1111_SEED = PersistentConfig(
+    "AUTOMATIC1111_SEED",
+    "image_generation.automatic1111.seed",
+    int(os.environ.get("AUTOMATIC1111_SEED", -1)),
+)
+
+AUTOMATIC1111_CLIP_SKIP = PersistentConfig(
+    "AUTOMATIC1111_CLIP_SKIP",
+    "image_generation.automatic1111.clip_skip",
+    (
+        int(os.environ.get("AUTOMATIC1111_CLIP_SKIP"))
+        if os.environ.get("AUTOMATIC1111_CLIP_SKIP")
+        else None
+    ),
+)
+
+AUTOMATIC1111_VAE = PersistentConfig(
+    "AUTOMATIC1111_VAE",
+    "image_generation.automatic1111.vae",
+    os.environ.get("AUTOMATIC1111_VAE", ""),
+)
+
+AUTOMATIC1111_ENABLE_HR = PersistentConfig(
+    "AUTOMATIC1111_ENABLE_HR",
+    "image_generation.automatic1111.enable_hr",
+    os.environ.get("AUTOMATIC1111_ENABLE_HR", "").lower() == "true",
+)
+
+AUTOMATIC1111_HR_SCALE = PersistentConfig(
+    "AUTOMATIC1111_HR_SCALE",
+    "image_generation.automatic1111.hr_scale",
+    (
+        float(os.environ.get("AUTOMATIC1111_HR_SCALE"))
+        if os.environ.get("AUTOMATIC1111_HR_SCALE")
+        else 2.0
+    ),
+)
+
+AUTOMATIC1111_HR_UPSCALER = PersistentConfig(
+    "AUTOMATIC1111_HR_UPSCALER",
+    "image_generation.automatic1111.hr_upscaler",
+    os.environ.get("AUTOMATIC1111_HR_UPSCALER", "Latent"),
+)
+
+AUTOMATIC1111_DENOISING_STRENGTH = PersistentConfig(
+    "AUTOMATIC1111_DENOISING_STRENGTH",
+    "image_generation.automatic1111.denoising_strength",
+    (
+        float(os.environ.get("AUTOMATIC1111_DENOISING_STRENGTH"))
+        if os.environ.get("AUTOMATIC1111_DENOISING_STRENGTH")
+        else 0.7
+    ),
+)
+
+AUTOMATIC1111_BATCH_COUNT = PersistentConfig(
+    "AUTOMATIC1111_BATCH_COUNT",
+    "image_generation.automatic1111.batch_count",
+    int(os.environ.get("AUTOMATIC1111_BATCH_COUNT", 1)),
+)
+
+AUTOMATIC1111_RESTORE_FACES = PersistentConfig(
+    "AUTOMATIC1111_RESTORE_FACES",
+    "image_generation.automatic1111.restore_faces",
+    os.environ.get("AUTOMATIC1111_RESTORE_FACES", "").lower() == "true",
+)
+
+AUTOMATIC1111_TILING = PersistentConfig(
+    "AUTOMATIC1111_TILING",
+    "image_generation.automatic1111.tiling",
+    os.environ.get("AUTOMATIC1111_TILING", "").lower() == "true",
+)
+
+AUTOMATIC1111_LORAS = PersistentConfig(
+    "AUTOMATIC1111_LORAS",
+    "image_generation.automatic1111.loras",
+    [],  # List of {"name": "lora_name", "weight": 1.0}
+)
+
+AUTOMATIC1111_PROMPT_GENERATION_MODEL = PersistentConfig(
+    "AUTOMATIC1111_PROMPT_GENERATION_MODEL",
+    "image_generation.automatic1111.prompt_generation_model",
+    os.environ.get("AUTOMATIC1111_PROMPT_GENERATION_MODEL", ""),
 )
 
 COMFYUI_BASE_URL = PersistentConfig(

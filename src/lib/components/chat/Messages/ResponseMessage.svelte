@@ -56,7 +56,7 @@
 		id: string;
 		model: string;
 		content: string;
-		files?: { type: string; url: string }[];
+		files?: { type: string; url: string; name?: string; size?: number; prompt?: string }[];
 		timestamp: number;
 		role: string;
 		statusHistory?: {
@@ -421,7 +421,8 @@
 		if (res) {
 			const files = res.map((image) => ({
 				type: 'image',
-				url: `${image.url}`
+				url: `${image.url}`,
+				prompt: image.prompt
 			}));
 
 			saveMessage(message.id, {
@@ -709,13 +710,16 @@
 									<div>
 										{#if file.type === 'image'}
 											<Image src={file.url} alt={message.content} />
+											{#if file.prompt}
+												<div class="text-xs text-gray-500 mt-1 max-w-sm">{file.prompt}</div>
+											{/if}
 										{:else}
 											<FileItem
 												item={file}
 												url={file.url}
-												name={file.name}
+												name={file.name ?? 'File'}
 												type={file.type}
-												size={file?.size}
+												size={file?.size ?? 0}
 												colorClassName="bg-white dark:bg-gray-850 "
 											/>
 										{/if}

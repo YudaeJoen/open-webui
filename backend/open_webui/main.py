@@ -8,6 +8,7 @@ import shutil
 import sys
 import time
 import random
+import threading
 from uuid import uuid4
 
 
@@ -61,6 +62,7 @@ from open_webui.socket.main import (
     get_active_user_ids,
 )
 from open_webui.routers import (
+    agents,
     audio,
     images,
     ollama,
@@ -142,6 +144,18 @@ from open_webui.config import (
     AUTOMATIC1111_CFG_SCALE,
     AUTOMATIC1111_SAMPLER,
     AUTOMATIC1111_SCHEDULER,
+    AUTOMATIC1111_SEED,
+    AUTOMATIC1111_CLIP_SKIP,
+    AUTOMATIC1111_VAE,
+    AUTOMATIC1111_ENABLE_HR,
+    AUTOMATIC1111_HR_SCALE,
+    AUTOMATIC1111_HR_UPSCALER,
+    AUTOMATIC1111_DENOISING_STRENGTH,
+    AUTOMATIC1111_BATCH_COUNT,
+    AUTOMATIC1111_RESTORE_FACES,
+    AUTOMATIC1111_TILING,
+    AUTOMATIC1111_LORAS,
+    AUTOMATIC1111_PROMPT_GENERATION_MODEL,
     COMFYUI_BASE_URL,
     COMFYUI_API_KEY,
     COMFYUI_WORKFLOW,
@@ -481,8 +495,9 @@ class SPAStaticFiles(StaticFiles):
                 raise ex
 
 
-print(
-    rf"""
+try:
+    print(
+        rf"""
  ██████╗ ██████╗ ███████╗███╗   ██╗    ██╗    ██╗███████╗██████╗ ██╗   ██╗██╗
 ██╔═══██╗██╔══██╗██╔════╝████╗  ██║    ██║    ██║██╔════╝██╔══██╗██║   ██║██║
 ██║   ██║██████╔╝█████╗  ██╔██╗ ██║    ██║ █╗ ██║█████╗  ██████╔╝██║   ██║██║
@@ -495,19 +510,36 @@ v{VERSION} - building the best AI user interface.
 {f"Commit: {WEBUI_BUILD_HASH}" if WEBUI_BUILD_HASH != "dev-build" else ""}
 https://github.com/open-webui/open-webui
 """
-)
+    )
+except UnicodeEncodeError:
+    # Fallback for consoles that don't support Unicode (e.g., Windows cp949)
+    print(
+        f"""
+OPEN WEBUI
+
+v{VERSION} - building the best AI user interface.
+{f"Commit: {WEBUI_BUILD_HASH}" if WEBUI_BUILD_HASH != "dev-build" else ""}
+https://github.com/open-webui/open-webui
+"""
+    )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.instance_id = INSTANCE_ID
+    log.info("Starting logger...")
     start_logger()
+    log.info("Logger started successfully.")
 
     if RESET_CONFIG_ON_START:
+        log.info("Resetting config...")
         reset_config()
+        log.info("Config reset successfully.")
 
     if LICENSE_KEY:
+        log.info("Getting license data...")
         get_license_data(app, LICENSE_KEY)
+        log.info("License data retrieved successfully.")
 
     # This should be blocking (sync) so functions are not deactivated on first /get_models calls
     # when the first user lands on the / route.
@@ -533,7 +565,9 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(periodic_usage_pool_cleanup())
 
+    log.info("Lifespan setup complete, yielding...")
     yield
+    log.info("Lifespan yield returned.")
 
     if hasattr(app.state, "redis_task_command_listener"):
         app.state.redis_task_command_listener.cancel()
@@ -951,6 +985,18 @@ app.state.config.AUTOMATIC1111_API_AUTH = AUTOMATIC1111_API_AUTH
 app.state.config.AUTOMATIC1111_CFG_SCALE = AUTOMATIC1111_CFG_SCALE
 app.state.config.AUTOMATIC1111_SAMPLER = AUTOMATIC1111_SAMPLER
 app.state.config.AUTOMATIC1111_SCHEDULER = AUTOMATIC1111_SCHEDULER
+app.state.config.AUTOMATIC1111_SEED = AUTOMATIC1111_SEED
+app.state.config.AUTOMATIC1111_CLIP_SKIP = AUTOMATIC1111_CLIP_SKIP
+app.state.config.AUTOMATIC1111_VAE = AUTOMATIC1111_VAE
+app.state.config.AUTOMATIC1111_ENABLE_HR = AUTOMATIC1111_ENABLE_HR
+app.state.config.AUTOMATIC1111_HR_SCALE = AUTOMATIC1111_HR_SCALE
+app.state.config.AUTOMATIC1111_HR_UPSCALER = AUTOMATIC1111_HR_UPSCALER
+app.state.config.AUTOMATIC1111_DENOISING_STRENGTH = AUTOMATIC1111_DENOISING_STRENGTH
+app.state.config.AUTOMATIC1111_BATCH_COUNT = AUTOMATIC1111_BATCH_COUNT
+app.state.config.AUTOMATIC1111_RESTORE_FACES = AUTOMATIC1111_RESTORE_FACES
+app.state.config.AUTOMATIC1111_TILING = AUTOMATIC1111_TILING
+app.state.config.AUTOMATIC1111_LORAS = AUTOMATIC1111_LORAS
+app.state.config.AUTOMATIC1111_PROMPT_GENERATION_MODEL = AUTOMATIC1111_PROMPT_GENERATION_MODEL
 app.state.config.COMFYUI_BASE_URL = COMFYUI_BASE_URL
 app.state.config.COMFYUI_API_KEY = COMFYUI_API_KEY
 app.state.config.COMFYUI_WORKFLOW = COMFYUI_WORKFLOW
@@ -1155,6 +1201,7 @@ app.include_router(models.router, prefix="/api/v1/models", tags=["models"])
 app.include_router(knowledge.router, prefix="/api/v1/knowledge", tags=["knowledge"])
 app.include_router(prompts.router, prefix="/api/v1/prompts", tags=["prompts"])
 app.include_router(tools.router, prefix="/api/v1/tools", tags=["tools"])
+app.include_router(agents.router, prefix="/api/v1/agents", tags=["agents"])
 
 app.include_router(memories.router, prefix="/api/v1/memories", tags=["memories"])
 app.include_router(folders.router, prefix="/api/v1/folders", tags=["folders"])

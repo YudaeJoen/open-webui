@@ -22,7 +22,7 @@ IF NOT "%WEBUI_SECRET_KEY_FILE%" == "" (
     SET "KEY_FILE=%WEBUI_SECRET_KEY_FILE%"
 )
 
-IF "%PORT%"=="" SET PORT=8080
+IF "%PORT%"=="" SET PORT=3000
 IF "%HOST%"=="" SET HOST=0.0.0.0
 SET "WEBUI_SECRET_KEY=%WEBUI_SECRET_KEY%"
 SET "WEBUI_JWT_SECRET_KEY=%WEBUI_JWT_SECRET_KEY%"
@@ -46,5 +46,5 @@ IF "%WEBUI_SECRET_KEY%%WEBUI_JWT_SECRET_KEY%" == " " (
 :: Execute uvicorn
 SET "WEBUI_SECRET_KEY=%WEBUI_SECRET_KEY%"
 IF "%UVICORN_WORKERS%"=="" SET UVICORN_WORKERS=1
-uvicorn open_webui.main:app --host "%HOST%" --port "%PORT%" --forwarded-allow-ips '*' --workers %UVICORN_WORKERS% --ws auto
-:: For ssl user uvicorn open_webui.main:app --host "%HOST%" --port "%PORT%" --forwarded-allow-ips '*' --ssl-keyfile "key.pem" --ssl-certfile "cert.pem" --ws auto
+"..\.venv\Scripts\uvicorn.exe" open_webui.main:app --host "%HOST%" --port "%PORT%" --forwarded-allow-ips '*' --workers %UVICORN_WORKERS% --ws auto
+:: For ssl user "..\.venv\Scripts\uvicorn.exe" open_webui.main:app --host "%HOST%" --port "%PORT%" --forwarded-allow-ips '*' --ssl-keyfile "key.pem" --ssl-certfile "cert.pem" --ws auto

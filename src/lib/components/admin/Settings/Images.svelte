@@ -11,8 +11,16 @@
 		updateImageGenerationConfig,
 		getConfig,
 		updateConfig,
-		verifyConfigUrl
+		verifyConfigUrl,
+		getAutomatic1111Samplers,
+		getAutomatic1111Schedulers,
+		getAutomatic1111Loras,
+		getAutomatic1111Vaes,
+		getAutomatic1111Upscalers,
+		refreshAutomatic1111Loras,
+		optimizeSettings
 	} from '$lib/apis/images';
+	import { getOllamaModels } from '$lib/apis/ollama';
 	import SensitiveInput from '$lib/components/common/SensitiveInput.svelte';
 	import Switch from '$lib/components/common/Switch.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
@@ -26,7 +34,24 @@
 	let imageGenerationConfig = null;
 
 	let models = null;
+	let ollamaModels = null;
 
+	// Dynamic lists from SD WebUI
+	let sdSamplers = null;
+	let sdSchedulers = null;
+	let sdLoras = null;
+	let sdVaes = null;
+	let sdUpscalers = null;
+
+	// Selected LoRAs for configuration
+	let selectedLoras: { name: string; weight: number }[] = [];
+
+	// Optimize settings
+	let optimizing = false;
+	let testPrompt = '';
+	let optimizeResult: any = null;
+
+	// Fallback static lists
 	let samplers = [
 		'DPM++ 2M',
 		'DPM++ SDE',
@@ -104,6 +129,141 @@
 		});
 	};
 
+	const loadOllamaModels = async () => {
+		ollamaModels = await getOllamaModels(localStorage.token).catch((error) => {
+			console.error('Failed to load Ollama models:', error);
+			return null;
+		});
+	};
+
+	const loadSDWebUIData = async () => {
+		if (config?.engine !== 'automatic1111') return;
+
+		try {
+			// Load all SD WebUI data in parallel
+			const [samplersRes, schedulersRes, lorasRes, vaesRes, upscalersRes] = await Promise.all([
+				getAutomatic1111Samplers(localStorage.token).catch(() => null),
+				getAutomatic1111Schedulers(localStorage.token).catch(() => null),
+				getAutomatic1111Loras(localStorage.token).catch(() => null),
+				getAutomatic1111Vaes(localStorage.token).catch(() => null),
+				getAutomatic1111Upscalers(localStorage.token).catch(() => null)
+			]);
+
+			if (samplersRes) {
+				sdSamplers = samplersRes.map((s: any) => s.name);
+			}
+			if (schedulersRes) {
+				sdSchedulers = schedulersRes.map((s: any) => s.name);
+			}
+			if (lorasRes) {
+				sdLoras = lorasRes;
+			}
+			if (vaesRes) {
+				sdVaes = vaesRes.map((v: any) => v.model_name);
+			}
+			if (upscalersRes) {
+				sdUpscalers = upscalersRes.map((u: any) => u.name);
+			}
+		} catch (error) {
+			console.error('Failed to load SD WebUI data:', error);
+		}
+	};
+
+	const handleRefreshLoras = async () => {
+		try {
+			await refreshAutomatic1111Loras(localStorage.token);
+			const lorasRes = await getAutomatic1111Loras(localStorage.token);
+			if (lorasRes) {
+				sdLoras = lorasRes;
+				toast.success($i18n.t('LoRA list refreshed'));
+			}
+		} catch (error) {
+			toast.error(`${error}`);
+		}
+	};
+
+	const handleOptimizeSettings = async () => {
+		if (!testPrompt.trim()) {
+			toast.error($i18n.t('Please enter a prompt to optimize'));
+			return;
+		}
+
+		optimizing = true;
+		optimizeResult = null;
+
+		try {
+			const currentSettings = {
+				steps: imageGenerationConfig?.IMAGE_STEPS,
+				cfg_scale: config?.automatic1111?.AUTOMATIC1111_CFG_SCALE,
+				sampler: config?.automatic1111?.AUTOMATIC1111_SAMPLER,
+				scheduler: config?.automatic1111?.AUTOMATIC1111_SCHEDULER,
+				size: imageGenerationConfig?.IMAGE_SIZE
+			};
+
+			const result = await optimizeSettings(localStorage.token, testPrompt, '', currentSettings);
+
+			if (result) {
+				optimizeResult = result;
+				toast.success($i18n.t('Settings optimized successfully'));
+			}
+		} catch (error) {
+			toast.error(`${error}`);
+		} finally {
+			optimizing = false;
+		}
+	};
+
+	const applyOptimizedSettings = () => {
+		if (!optimizeResult) return;
+
+		// Apply optimized settings to config
+		if (optimizeResult.sampler_name) {
+			config.automatic1111.AUTOMATIC1111_SAMPLER = optimizeResult.sampler_name;
+		}
+		if (optimizeResult.scheduler) {
+			config.automatic1111.AUTOMATIC1111_SCHEDULER = optimizeResult.scheduler;
+		}
+		if (optimizeResult.cfg_scale) {
+			config.automatic1111.AUTOMATIC1111_CFG_SCALE = optimizeResult.cfg_scale;
+		}
+		if (optimizeResult.seed !== undefined) {
+			config.automatic1111.AUTOMATIC1111_SEED = optimizeResult.seed;
+		}
+		if (optimizeResult.clip_skip) {
+			config.automatic1111.AUTOMATIC1111_CLIP_SKIP = optimizeResult.clip_skip;
+		}
+		if (optimizeResult.enable_hr !== undefined) {
+			config.automatic1111.AUTOMATIC1111_ENABLE_HR = optimizeResult.enable_hr;
+		}
+		if (optimizeResult.hr_scale) {
+			config.automatic1111.AUTOMATIC1111_HR_SCALE = optimizeResult.hr_scale;
+		}
+		if (optimizeResult.denoising_strength) {
+			config.automatic1111.AUTOMATIC1111_DENOISING_STRENGTH = optimizeResult.denoising_strength;
+		}
+		if (optimizeResult.restore_faces !== undefined) {
+			config.automatic1111.AUTOMATIC1111_RESTORE_FACES = optimizeResult.restore_faces;
+		}
+
+		// Apply to image generation config
+		if (optimizeResult.steps) {
+			imageGenerationConfig.IMAGE_STEPS = optimizeResult.steps;
+		}
+		if (optimizeResult.width && optimizeResult.height) {
+			imageGenerationConfig.IMAGE_SIZE = `${optimizeResult.width}x${optimizeResult.height}`;
+		}
+
+		toast.success($i18n.t('Optimized settings applied'));
+	};
+
+	const addLora = () => {
+		selectedLoras = [...selectedLoras, { name: '', weight: 1.0 }];
+	};
+
+	const removeLora = (index: number) => {
+		selectedLoras = selectedLoras.filter((_, i) => i !== index);
+	};
+
 	const updateConfigHandler = async () => {
 		const res = await updateConfig(localStorage.token, config)
 			.catch((error) => {
@@ -158,6 +318,11 @@
 			});
 		}
 
+		// Save selected LoRAs to config
+		if (config?.automatic1111) {
+			config.automatic1111.AUTOMATIC1111_LORAS = selectedLoras.filter((l) => l.name);
+		}
+
 		await updateConfig(localStorage.token, config).catch((error) => {
 			toast.error(`${error}`);
 			loading = false;
@@ -188,7 +353,11 @@
 
 			if (config.enabled) {
 				getModels();
+				loadSDWebUIData();
 			}
+
+			// Load Ollama models for prompt generation
+			loadOllamaModels();
 
 			if (config.comfyui.COMFYUI_WORKFLOW) {
 				try {
@@ -213,6 +382,14 @@
 					node_ids: typeof n.node_ids === 'string' ? n.node_ids : n.node_ids.join(',')
 				};
 			});
+
+			// Load selected LoRAs from config
+			if (config.automatic1111?.AUTOMATIC1111_LORAS) {
+				selectedLoras = config.automatic1111.AUTOMATIC1111_LORAS.map((l: any) => ({
+					name: l.name || '',
+					weight: l.weight || 1.0
+				}));
+			}
 
 			const imageConfigRes = await getImageGenerationConfig(localStorage.token).catch((error) => {
 				toast.error(`${error}`);
@@ -444,6 +621,318 @@
 								</Tooltip>
 							</div>
 						</div>
+					</div>
+
+					<!---Seed-->
+					<div>
+						<div class=" mb-2.5 text-sm font-medium">{$i18n.t('Set Seed')}</div>
+						<div class="flex w-full">
+							<div class="flex-1 mr-2">
+								<Tooltip content={$i18n.t('Enter Seed (-1 for random)')} placement="top-start">
+									<input
+										type="number"
+										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+										placeholder={$i18n.t('Enter Seed (-1 for random)')}
+										bind:value={config.automatic1111.AUTOMATIC1111_SEED}
+									/>
+								</Tooltip>
+							</div>
+						</div>
+					</div>
+
+					<!---CLIP Skip-->
+					<div>
+						<div class=" mb-2.5 text-sm font-medium">{$i18n.t('Set CLIP Skip')}</div>
+						<div class="flex w-full">
+							<div class="flex-1 mr-2">
+								<Tooltip content={$i18n.t('Enter CLIP Skip (e.g. 1, 2)')} placement="top-start">
+									<input
+										type="number"
+										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+										placeholder={$i18n.t('Enter CLIP Skip (e.g. 1, 2)')}
+										bind:value={config.automatic1111.AUTOMATIC1111_CLIP_SKIP}
+									/>
+								</Tooltip>
+							</div>
+						</div>
+					</div>
+
+					<!---VAE-->
+					<div>
+						<div class=" mb-2.5 text-sm font-medium">{$i18n.t('Set VAE')}</div>
+						<div class="flex w-full">
+							<div class="flex-1 mr-2">
+								<Tooltip content={$i18n.t('Select VAE model')} placement="top-start">
+									<input
+										list="vae-list"
+										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+										placeholder={$i18n.t('Select VAE model')}
+										bind:value={config.automatic1111.AUTOMATIC1111_VAE}
+									/>
+
+									<datalist id="vae-list">
+										{#each sdVaes ?? [] as vae}
+											<option value={vae}>{vae}</option>
+										{/each}
+									</datalist>
+								</Tooltip>
+							</div>
+						</div>
+					</div>
+
+					<!---Batch Count-->
+					<div>
+						<div class=" mb-2.5 text-sm font-medium">{$i18n.t('Set Batch Count')}</div>
+						<div class="flex w-full">
+							<div class="flex-1 mr-2">
+								<Tooltip content={$i18n.t('Number of batches to generate')} placement="top-start">
+									<input
+										type="number"
+										min="1"
+										max="16"
+										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+										placeholder={$i18n.t('Enter Batch Count (e.g. 1)')}
+										bind:value={config.automatic1111.AUTOMATIC1111_BATCH_COUNT}
+									/>
+								</Tooltip>
+							</div>
+						</div>
+					</div>
+
+					<!---Hires Fix Settings-->
+					<div class="border dark:border-gray-850 rounded-lg p-3 mt-2">
+						<div class=" py-1 flex w-full justify-between">
+							<div class=" self-center text-xs font-medium">{$i18n.t('Enable Hires Fix')}</div>
+							<div class="px-1">
+								<Switch bind:state={config.automatic1111.AUTOMATIC1111_ENABLE_HR} />
+							</div>
+						</div>
+
+						{#if config.automatic1111.AUTOMATIC1111_ENABLE_HR}
+							<div class="mt-2 space-y-2">
+								<div>
+									<div class=" mb-1 text-xs">{$i18n.t('HR Scale')}</div>
+									<input
+										type="number"
+										step="0.1"
+										min="1"
+										max="4"
+										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+										bind:value={config.automatic1111.AUTOMATIC1111_HR_SCALE}
+									/>
+								</div>
+								<div>
+									<div class=" mb-1 text-xs">{$i18n.t('HR Upscaler')}</div>
+									<input
+										list="upscaler-list"
+										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+										bind:value={config.automatic1111.AUTOMATIC1111_HR_UPSCALER}
+									/>
+
+									<datalist id="upscaler-list">
+										{#each sdUpscalers ?? ['Latent', 'Latent (nearest)', 'Latent (nearest-exact)', 'None', 'Lanczos', 'Nearest'] as upscaler}
+											<option value={upscaler}>{upscaler}</option>
+										{/each}
+									</datalist>
+								</div>
+								<div>
+									<div class=" mb-1 text-xs">{$i18n.t('Denoising Strength')}</div>
+									<input
+										type="number"
+										step="0.05"
+										min="0"
+										max="1"
+										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+										bind:value={config.automatic1111.AUTOMATIC1111_DENOISING_STRENGTH}
+									/>
+								</div>
+							</div>
+						{/if}
+					</div>
+
+					<!---Additional Options-->
+					<div class="mt-2 space-y-1">
+						<div class=" py-1 flex w-full justify-between">
+							<div class=" self-center text-xs font-medium">{$i18n.t('Restore Faces')}</div>
+							<div class="px-1">
+								<Switch bind:state={config.automatic1111.AUTOMATIC1111_RESTORE_FACES} />
+							</div>
+						</div>
+
+						<div class=" py-1 flex w-full justify-between">
+							<div class=" self-center text-xs font-medium">{$i18n.t('Tiling')}</div>
+							<div class="px-1">
+								<Switch bind:state={config.automatic1111.AUTOMATIC1111_TILING} />
+							</div>
+						</div>
+					</div>
+
+					<!---LoRA Configuration-->
+					<div class="border dark:border-gray-850 rounded-lg p-3 mt-2">
+						<div class="flex justify-between items-center mb-2">
+							<div class="text-sm font-medium">{$i18n.t('LoRA Configuration')}</div>
+							<div class="flex gap-1">
+								<button
+									type="button"
+									class="px-2 py-1 text-xs bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 rounded"
+									on:click={handleRefreshLoras}
+								>
+									{$i18n.t('Refresh')}
+								</button>
+								<button
+									type="button"
+									class="px-2 py-1 text-xs bg-blue-500 hover:bg-blue-600 text-white rounded"
+									on:click={addLora}
+								>
+									{$i18n.t('Add LoRA')}
+								</button>
+							</div>
+						</div>
+
+						{#each selectedLoras as lora, index}
+							<div class="flex gap-2 mb-2 items-center">
+								<div class="flex-1">
+									<input
+										list="lora-list"
+										class="w-full rounded-lg py-2 px-3 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+										placeholder={$i18n.t('Select LoRA')}
+										bind:value={lora.name}
+									/>
+								</div>
+								<div class="w-20">
+									<input
+										type="number"
+										step="0.1"
+										min="0"
+										max="2"
+										class="w-full rounded-lg py-2 px-3 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+										placeholder="Weight"
+										bind:value={lora.weight}
+									/>
+								</div>
+								<button
+									type="button"
+									class="p-2 text-red-500 hover:bg-red-100 dark:hover:bg-red-900/20 rounded"
+									on:click={() => removeLora(index)}
+								>
+									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4">
+										<path fill-rule="evenodd" d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193V3.75A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z" clip-rule="evenodd" />
+									</svg>
+								</button>
+							</div>
+						{/each}
+
+						<datalist id="lora-list">
+							{#each sdLoras ?? [] as lora}
+								<option value={lora.name}>{lora.alias || lora.name}</option>
+							{/each}
+						</datalist>
+
+						{#if selectedLoras.length === 0}
+							<div class="text-xs text-gray-500 text-center py-2">
+								{$i18n.t('No LoRAs configured. Click "Add LoRA" to add one.')}
+							</div>
+						{/if}
+					</div>
+
+					<!---Prompt Generation Model-->
+					<div class="mt-2">
+						<div class=" mb-2.5 text-sm font-medium">{$i18n.t('Prompt Generation Model')}</div>
+						<div class="flex w-full">
+							<div class="flex-1 mr-2">
+								<Tooltip content={$i18n.t('Select Ollama model for prompt generation')} placement="top-start">
+									<input
+										list="ollama-model-list"
+										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+										placeholder={$i18n.t('Select Ollama model')}
+										bind:value={config.automatic1111.AUTOMATIC1111_PROMPT_GENERATION_MODEL}
+									/>
+
+									<datalist id="ollama-model-list">
+										{#each ollamaModels?.models ?? [] as model}
+											<option value={model.name}>{model.name}</option>
+										{/each}
+									</datalist>
+								</Tooltip>
+							</div>
+						</div>
+						<div class="mt-1 text-xs text-gray-400 dark:text-gray-500">
+							{$i18n.t('Used for generating optimized prompts from user descriptions')}
+						</div>
+					</div>
+
+					<!---Optimize Settings-->
+					<div class="border dark:border-gray-850 rounded-lg p-3 mt-2">
+						<div class="text-sm font-medium mb-2">{$i18n.t('Optimize Settings')}</div>
+						<div class="text-xs text-gray-500 mb-3">
+							{$i18n.t('Enter a test prompt to get AI-optimized settings for that content type')}
+						</div>
+
+						<div class="flex gap-2 mb-3">
+							<input
+								class="flex-1 rounded-lg py-2 px-3 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								placeholder={$i18n.t('Enter test prompt (e.g. portrait of a woman, anime character, landscape)')}
+								bind:value={testPrompt}
+							/>
+							<button
+								type="button"
+								class="px-3 py-2 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded-lg flex items-center gap-1 {optimizing ? 'opacity-50 cursor-not-allowed' : ''}"
+								on:click={handleOptimizeSettings}
+								disabled={optimizing}
+							>
+								{#if optimizing}
+									<svg class="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
+										<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" class="opacity-25"/>
+										<path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" class="opacity-75"/>
+									</svg>
+								{:else}
+									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4">
+										<path fill-rule="evenodd" d="M15.312 11.424a5.5 5.5 0 01-9.201 2.466l-.312-.311h2.433a.75.75 0 000-1.5H3.989a.75.75 0 00-.75.75v4.242a.75.75 0 001.5 0v-2.43l.31.31a7 7 0 0011.712-3.138.75.75 0 00-1.449-.39zm1.23-3.723a.75.75 0 00.219-.53V2.929a.75.75 0 00-1.5 0V5.36l-.31-.31A7 7 0 003.239 8.188a.75.75 0 101.448.389A5.5 5.5 0 0113.89 6.11l.311.31h-2.432a.75.75 0 000 1.5h4.243a.75.75 0 00.53-.219z" clip-rule="evenodd" />
+									</svg>
+								{/if}
+								{$i18n.t('Optimize')}
+							</button>
+						</div>
+
+						{#if optimizeResult}
+							<div class="bg-gray-50 dark:bg-gray-900 rounded-lg p-3 text-xs space-y-2">
+								<div class="font-medium text-sm mb-2">{$i18n.t('Optimized Settings')}</div>
+
+								<div class="grid grid-cols-2 gap-2">
+									<div><span class="text-gray-500">Sampler:</span> {optimizeResult.sampler_name}</div>
+									<div><span class="text-gray-500">Scheduler:</span> {optimizeResult.scheduler}</div>
+									<div><span class="text-gray-500">Steps:</span> {optimizeResult.steps}</div>
+									<div><span class="text-gray-500">CFG Scale:</span> {optimizeResult.cfg_scale}</div>
+									<div><span class="text-gray-500">Size:</span> {optimizeResult.width}x{optimizeResult.height}</div>
+									<div><span class="text-gray-500">CLIP Skip:</span> {optimizeResult.clip_skip}</div>
+									<div><span class="text-gray-500">Hires Fix:</span> {optimizeResult.enable_hr ? 'Yes' : 'No'}</div>
+									<div><span class="text-gray-500">Restore Faces:</span> {optimizeResult.restore_faces ? 'Yes' : 'No'}</div>
+								</div>
+
+								{#if optimizeResult.reasoning}
+									<div class="mt-2 pt-2 border-t dark:border-gray-800">
+										<span class="text-gray-500">{$i18n.t('Reasoning')}:</span> {optimizeResult.reasoning}
+									</div>
+								{/if}
+
+								<div class="mt-3 flex gap-2">
+									<button
+										type="button"
+										class="px-3 py-1.5 text-xs bg-green-500 hover:bg-green-600 text-white rounded"
+										on:click={applyOptimizedSettings}
+									>
+										{$i18n.t('Apply Settings')}
+									</button>
+									<button
+										type="button"
+										class="px-3 py-1.5 text-xs bg-gray-200 hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 rounded"
+										on:click={() => optimizeResult = null}
+									>
+										{$i18n.t('Dismiss')}
+									</button>
+								</div>
+							</div>
+						{/if}
 					</div>
 				{:else if config?.engine === 'comfyui'}
 					<div class="">

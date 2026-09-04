@@ -67,7 +67,12 @@ except Exception:
 ####################################
 
 GLOBAL_LOG_LEVEL = os.environ.get("GLOBAL_LOG_LEVEL", "").upper()
-if GLOBAL_LOG_LEVEL in logging.getLevelNamesMapping():
+if hasattr(logging, "getLevelNamesMapping"):
+    valid_levels = logging.getLevelNamesMapping()
+else:
+    valid_levels = {"CRITICAL": 50, "FATAL": 50, "ERROR": 40, "WARN": 30, "WARNING": 30, "INFO": 20, "DEBUG": 10, "NOTSET": 0}
+
+if GLOBAL_LOG_LEVEL in valid_levels:
     logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL, force=True)
 else:
     GLOBAL_LOG_LEVEL = "INFO"
@@ -100,15 +105,13 @@ SRC_LOG_LEVELS = {}
 for source in log_sources:
     log_env_var = source + "_LOG_LEVEL"
     SRC_LOG_LEVELS[source] = os.environ.get(log_env_var, "").upper()
-    if SRC_LOG_LEVELS[source] not in logging.getLevelNamesMapping():
+    if SRC_LOG_LEVELS[source] not in valid_levels:
         SRC_LOG_LEVELS[source] = GLOBAL_LOG_LEVEL
     log.info(f"{log_env_var}: {SRC_LOG_LEVELS[source]}")
 
 log.setLevel(SRC_LOG_LEVELS["CONFIG"])
 
-WEBUI_NAME = os.environ.get("WEBUI_NAME", "Open WebUI")
-if WEBUI_NAME != "Open WebUI":
-    WEBUI_NAME += " (Open WebUI)"
+WEBUI_NAME = os.environ.get("WEBUI_NAME", "Myme AI")
 
 WEBUI_FAVICON_URL = "https://openwebui.com/favicon.png"
 
