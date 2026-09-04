@@ -310,10 +310,10 @@
 					} else {
 						return e.name;
 					}
-				}, '')} / Open WebUI</title
+				}, '')} / Myme AI</title
 		>
 	{:else}
-		<title>#{channel?.name ?? 'Channel'} / Open WebUI</title>
+		<title>#{channel?.name ?? 'Channel'} / Myme AI</title>
 	{/if}
 </svelte:head>
 

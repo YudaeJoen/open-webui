@@ -232,6 +232,16 @@
 								</span>
 							</a>
 						{/if}
+
+						<!-- Game Agent 메뉴 추가 -->
+						<a
+							class="min-w-fit rounded-full p-1.5 {$page.url.pathname.includes('/workspace/games')
+								? ''
+								: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition"
+							href="/workspace/games"
+						>
+							🎮 Game Agent
+						</a>
 					</div>
 
 					<div class="ml-auto flex shrink-0 items-center gap-1">

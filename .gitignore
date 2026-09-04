@@ -311,3 +311,27 @@ cypress/videos
 cypress/screenshots
 .vscode/settings.json
 .cptr
+# --- fork-local (Myme AI) ---
+backend/data/
+open-webui/
+*.zip
+err_log
+agent_*_results.*
+game_result_*.html
+# frontend build output copied into backend static
+backend/open_webui/static/_app/
+backend/open_webui/static/.vite/
+backend/open_webui/static/index.html
+backend/open_webui/static/manifest.json
+backend/open_webui/static/opensearch.xml
+backend/open_webui/static/robots.txt
+backend/open_webui/static/pyodide/
+backend/open_webui/static/wasm/
+backend/open_webui/static/static/
+backend/open_webui/static/themes/
+backend/open_webui/static/audio/
+backend/open_webui/static/assets/emojis/
+backend/open_webui/static/assets/fonts/
+backend/open_webui/static/assets/images/
+backend/open_webui/static/doge.png
+backend/open_webui/static/user.png
